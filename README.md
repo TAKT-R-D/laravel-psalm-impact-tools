@@ -50,6 +50,8 @@ $ mkdir -p .psalm-cache
 </psalm>
 ```
 
+Put `psalm.xml` on your project root.
+
 ### Place toolkit
 
 Place all scripts under `<your laravel project root>/bin`.
