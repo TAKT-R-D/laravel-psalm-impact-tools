@@ -1,0 +1,162 @@
+#!/usr/bin/env zsh
+# impact - Reference Impact Analysis Tool for PHP (Laravel/Psalm)
+#
+# Summary:
+#   This script performs a breadth-first search (BFS) to analyze the impact and reference relationships
+#   of a given PHP class or file in a Laravel project using Psalm. It traces which classes or files
+#   reference the target, up to a specified depth, and outputs the dependency tree.
+#
+# Usage:
+#   bin/impact <FQCN or PHP file (repo-root relative)> [depth=3]
+#     - FQCN: Fully Qualified Class Name (e.g., App\\Services\\WeatherService)
+#     - PHP file: Path relative to the repository root (e.g., app/Services/WeatherService.php)
+#     - depth: (optional) How many levels to traverse (default: 3)
+#
+# Example:
+#   bin/impact app/Services/WeatherService.php
+#   bin/impact App\\Services\\WeatherService 4
+#
+[[ -z "$ZSH_VERSION" ]] && exec zsh "$0" "$@"
+set -euo pipefail
+
+DIR=${0:a:h}
+ROOT=$(cd "$DIR/.." && pwd)
+
+: ${HOST_UID:=$(id -u)}
+: ${HOST_GID:=$(id -g)}
+export HOST_UID HOST_GID
+
+if (( $# < 1 )); then
+  print -ru2 -- "Usage: bin/impact <FQCN or PHP file (repo-root relative)> [depth=3]"
+  exit 1
+fi
+
+TARGET=$1
+DEPTH=${2:-3}
+
+# Find references to a given symbol using Psalm
+psalm_find_refs() {
+    local sym="$1"
+    # bin/psref "$sym"
+    APP_KEY=${APP_KEY:-base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=} \
+    noglob vendor/bin/psalm \
+      -c psalm.xml \
+      --root=. \
+      --threads="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)" \
+      --no-progress \
+      --show-info=false \
+      --find-references-to="$sym"
+}
+
+
+# Get the Fully Qualified Class Name (FQCN) from a PHP file
+fqcn_from_file() {
+  local host_file="$1"
+  local ns cls
+  ns=$(LC_ALL=C sed -E -n 's/^[[:space:]]*namespace[[:space:]]+([^;]+);.*/\1/p' "$host_file" | head -n1)
+  cls=$(LC_ALL=C sed -E -n 's/^[[:space:]]*(abstract[[:space:]]+)?(final[[:space:]]+)?(class|interface|trait)[[:space:]]+([A-Za-z_][A-Za-z0-9_]*).*/\4/p' "$host_file" | head -n1 || true)
+  [[ -n "$cls" ]] || { echo ""; return 0; }
+  if [[ -n "$ns" ]]; then echo "${ns}\\${cls}"; else echo "$cls"; fi
+}
+
+if [[ "$TARGET" == *.php ]]; then
+  local_file="$ROOT/$TARGET"
+  [[ -f "$local_file" ]] || { print -ru2 -- "File not found: $TARGET"; exit 1; }
+  fqn="$(fqcn_from_file "$local_file")"
+  [[ -n "$fqn" ]] || { print -ru2 -- "Class not found in file: $TARGET"; exit 1; }
+  TARGET="$fqn"
+fi
+
+## Extract the referenced class or file from a line (prefer CallerClass, otherwise infer from file -> FQCN)
+extract_caller_from_line() {
+  local line="$1"
+
+  # 1) Prefer CallerClass::member (only those containing namespace \)
+  local tok cls
+  tok=$(print -r -- "$line" | grep -Eo '[A-Za-z0-9_\\]+::[A-Za-z0-9_]+' | tail -n1 || true)
+  if [[ -n "$tok" ]]; then
+    cls="${tok%%::*}"
+    [[ "$cls" == *\\* ]] && { echo "CLASS:$cls"; return 0; }
+  fi
+
+  # 2) Pick up file path at the beginning of the line (e.g., app/...php)
+  local rel file_host fqn
+  rel=$(print -r -- "$line" | sed -E -n 's#^([^:]+\.php):.*#\1#p' | head -n1)
+  if [[ -n "$rel" ]]; then
+  # Psalm outputs /app as CWD, so map to host side
+    file_host="$ROOT/$rel"
+    if [[ -f "$file_host" ]]; then
+      fqn="$(fqcn_from_file "$file_host")"
+      if [[ -n "$fqn" ]]; then
+        echo "CLASS:$fqn"
+      else
+  # No class definition (e.g., route/web.php)
+        echo "FILE:$rel"
+      fi
+      return 0
+    fi
+  fi
+
+  # 3) Return empty if nothing is found
+  echo ""
+}
+
+
+# Breadth-First Search (BFS) with duplicate elimination using associative arrays.
+# Only CLASS entries proceed to the next level.
+typeset -A SEEN_CLASS  # Tracks seen classes globally
+typeset -A SEEN_FILE   # Tracks seen files globally
+SEEN_CLASS[$TARGET]=1
+
+typeset -a CURRENT NEXT
+CURRENT=("$TARGET")
+
+integer level=1
+while (( level <= DEPTH )); do
+  (( ${#CURRENT[@]} == 0 )) && break
+  print -r -- "LEVEL $level:"
+  NEXT=()
+  for seed in "${CURRENT[@]}"; do
+    print -r -- "  seed: $seed"
+    # Initialize duplicate elimination associative arrays for each seed
+    # (workaround for zsh scope issues: unset then typeset -A)
+    unset SEED_SEEN_CLASS SEED_SEEN_FILE
+    typeset -A SEED_SEEN_CLASS  # Tracks seen classes per seed
+    typeset -A SEED_SEEN_FILE   # Tracks seen files per seed
+    out="$(psalm_find_refs "$seed")"
+
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      entry="$(extract_caller_from_line "$line")"
+      [[ -z "$entry" ]] && continue
+
+      case "$entry" in
+        CLASS:*)
+          caller="${entry#CLASS:}"
+          if [[ -z "${SEED_SEEN_CLASS[$caller]-}" ]]; then
+            SEED_SEEN_CLASS[$caller]=1
+            print -r -- "    - $caller"
+          fi
+          if [[ -z "${SEEN_CLASS[$caller]-}" ]]; then
+            SEEN_CLASS[$caller]=1
+            NEXT+=("$caller")   # Only classes proceed to the next level
+          fi
+          ;;
+        FILE:*)
+          relfile="${entry#FILE:}"
+          if [[ -z "${SEED_SEEN_FILE[$relfile]-}" ]]; then
+            SEED_SEEN_FILE[$relfile]=1
+            print -r -- "    - [file] $relfile"
+          fi
+          # SEEN_FILE is only for seed progression, not output suppression
+          if [[ -z "${SEEN_FILE[$relfile]-}" ]]; then
+            SEEN_FILE[$relfile]=1
+            # Files do not proceed as seeds (end point)
+          fi
+          ;;
+      esac
+    done <<< "$out"
+  done
+  CURRENT=("${NEXT[@]}")
+  (( level++ ))
+done

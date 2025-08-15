@@ -1,0 +1,23 @@
+#!/usr/bin/env zsh
+# psalm - Psalm Static Analysis Runner for Laravel
+#
+# Summary:
+#   This script runs Psalm static analysis for the Laravel project with recommended options.
+#   It sets up the environment and runs Psalm with parallelism and project config.
+#
+# Usage:
+#   bin/psalm [psalm-args]
+#     - psalm-args: (optional) Any additional arguments to pass to Psalm
+#
+# Example:
+#   bin/psalm
+#   bin/psalm --show-info=true
+#
+[[ -z "$ZSH_VERSION" ]] && exec zsh "$0" "$@"
+set -euo pipefail
+
+APP_KEY=${APP_KEY:-base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=} \
+noglob vendor/bin/psalm \
+  -c psalm.xml \
+  --root=. \
+  --threads="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)" 

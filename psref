@@ -1,0 +1,72 @@
+#!/usr/bin/env zsh
+# psref - Simple Reference Finder for PHP (Laravel/Psalm)
+#
+# Summary:
+#   This script finds all references to a given PHP class or file in a Laravel project using Psalm.
+#   It outputs all locations where the specified class or file is referenced.
+#
+# Usage:
+#   bin/psref <FQCN | path/to/ClassOrInterface.php>
+#     - FQCN: Fully Qualified Class Name (e.g., App\\Services\\WeatherService)
+#     - PHP file: Path relative to the repository root (e.g., app/Services/WeatherService.php)
+#
+# Example:
+#   bin/psref app/Services/WeatherService.php
+#   bin/psref App\\Services\\WeatherService
+#
+[[ -z "$ZSH_VERSION" ]] && exec zsh "$0" "$@"
+set -euo pipefail
+
+DIR=${0:a:h}
+ROOT=$(cd "$DIR/.." && pwd)
+
+
+# Accepts one argument: FQCN or PHP file
+if [[ $# -ne 1 ]]; then
+  echo "Usage: bin/psref <FQCN | path/to/ClassOrInterface.php>" >&2
+  exit 1
+fi
+
+TARGET="$1"
+
+# Get the Fully Qualified Class Name (FQCN) from a PHP file
+fqcn_from_file() {
+  local host_file="$1"
+  local ns cls
+  ns=$(LC_ALL=C sed -E -n 's/^[[:space:]]*namespace[[:space:]]+([^;]+);.*/\1/p' "$host_file" | head -n1)
+  cls=$(LC_ALL=C sed -E -n 's/^[[:space:]]*(abstract[[:space:]]+)?(final[[:space:]]+)?(class|interface|trait)[[:space:]]+([A-Za-z_][A-Za-z0-9_]*).*/\4/p' "$host_file" | head -n1 || true)
+  [[ -n "$cls" ]] || { echo ""; return 0; }
+  if [[ -n "$ns" ]]; then echo "${ns}\\${cls}"; else echo "$cls"; fi
+}
+
+if [[ "$TARGET" == *.php ]]; then
+  local_file="$ROOT/$TARGET"
+  [[ -f "$local_file" ]] || { print -ru2 -- "File not found: $TARGET"; exit 1; }
+  fqn="$(fqcn_from_file "$local_file")"
+  [[ -n "$fqn" ]] || { print -ru2 -- "Class not found in file: $TARGET"; exit 1; }
+  TARGET="$fqn"
+fi
+
+
+# Find references to a given symbol using Psalm
+psalm_find_refs() {
+    local sym="$1"
+    # bin/psref "$sym"
+    APP_KEY=${APP_KEY:-base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=} \
+    noglob vendor/bin/psalm \
+      -c psalm.xml \
+      --root=. \
+      --threads="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)" \
+      --no-progress \
+      --show-info=false \
+      --find-references-to="$sym"
+}
+
+
+# Run Psalm to find references (noglob to avoid zsh globbing, parallel for speed)
+APP_KEY=${APP_KEY:-base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=} \
+noglob vendor/bin/psalm \
+  -c psalm.xml \
+  --root=. \
+  --threads="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)" \
+  --find-references-to="$TARGET"

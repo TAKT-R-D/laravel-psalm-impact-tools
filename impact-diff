@@ -1,0 +1,36 @@
+#!/usr/bin/env zsh
+# impact-diff - Impact Analysis for Changed PHP Files (Laravel/Psalm)
+#
+# Summary:
+#   This script runs impact analysis (bin/impact) for all changed PHP files (vs a base git ref) in a Laravel project using Psalm.
+#   It lists all changed PHP files compared to the specified base, and runs impact on each.
+#
+# Usage:
+#   bin/impact-diff [base-ref]
+#     - base-ref: (optional) The git reference to compare against (default: remotes/origin/main)
+#
+# Example:
+#   bin/impact-diff
+#   bin/impact-diff main
+#
+[[ -z "$ZSH_VERSION" ]] && exec zsh "$0" "$@"
+set -euo pipefail
+
+BASE="${1:-remotes/origin/main}"
+
+## List changed files, filter to .php, and only include files that currently exist
+changed=()
+while IFS= read -r p; do
+  [[ -z "$p" ]] && continue
+  [[ "${p:l}" == *.php ]] || continue
+  [[ -f "$p" ]] || continue   # Exclude deleted files (D)
+  changed+=("$p")
+done < <(git diff --name-only "$BASE")
+
+(( ${#changed} )) || { print -r -- "No changed PHP files vs $BASE."; exit 0; }
+
+for p in "${changed[@]}"; do
+  print -r -- "=== $p ==="
+  ./bin/impact "$p" || true
+  print -r -- ""
+done
